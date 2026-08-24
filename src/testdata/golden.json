@@ -1,0 +1,65 @@
+{
+  "_comment": "Shared fixtures for the TS and Go protocol implementations. Both sides decode every entry and re-encode it to the same JSON. If you change the protocol, change this file and both implementations together.",
+  "cases": [
+    {
+      "name": "hello",
+      "json": "{\"v\":1,\"type\":\"hello\",\"sid\":\"\",\"payload\":{\"token\":\"dev-token\",\"sessionName\":\"pietin\",\"cwd\":\"/home/u/p\",\"cols\":120,\"rows\":40,\"piVersion\":\"0.84.2\"}}"
+    },
+    {
+      "name": "output",
+      "json": "{\"v\":1,\"type\":\"output\",\"sid\":\"s_abc123\",\"seq\":42,\"payload\":{\"data\":\"G1swbUhlbGxvG1swbQ==\"}}"
+    },
+    {
+      "name": "resize",
+      "json": "{\"v\":1,\"type\":\"resize\",\"sid\":\"s_abc123\",\"payload\":{\"cols\":80,\"rows\":24,\"owner\":\"local\"}}"
+    },
+    {
+      "name": "resize_browser_owned",
+      "json": "{\"v\":1,\"type\":\"resize\",\"sid\":\"s_abc123\",\"payload\":{\"cols\":180,\"rows\":50,\"owner\":\"browser\"}}"
+    },
+    {
+      "name": "meta",
+      "json": "{\"v\":1,\"type\":\"meta\",\"sid\":\"s_abc123\",\"payload\":{\"model\":\"claude-sonnet-4-5\",\"streaming\":true,\"contextTokens\":12345,\"contextPercent\":6.2}}"
+    },
+    {
+      "name": "meta_nulls",
+      "json": "{\"v\":1,\"type\":\"meta\",\"sid\":\"s_abc123\",\"payload\":{\"model\":null,\"streaming\":false,\"contextTokens\":null,\"contextPercent\":null}}"
+    },
+    {
+      "name": "attach",
+      "json": "{\"v\":1,\"type\":\"attach\",\"sid\":\"\",\"payload\":{\"sessionId\":\"s_abc123\"}}"
+    },
+    {
+      "name": "prompt",
+      "json": "{\"v\":1,\"type\":\"prompt\",\"sid\":\"s_abc123\",\"payload\":{\"text\":\"run the tests\"}}"
+    },
+    {
+      "name": "abort",
+      "json": "{\"v\":1,\"type\":\"abort\",\"sid\":\"s_abc123\",\"payload\":{}}"
+    },
+    {
+      "name": "input",
+      "json": "{\"v\":1,\"type\":\"input\",\"sid\":\"s_abc123\",\"payload\":{\"data\":\"bHMgLWxhCg==\"}}"
+    },
+    {
+      "name": "request_redraw",
+      "json": "{\"v\":1,\"type\":\"request_redraw\",\"sid\":\"s_abc123\",\"payload\":{}}"
+    },
+    {
+      "name": "set_size",
+      "json": "{\"v\":1,\"type\":\"set_size\",\"sid\":\"s_abc123\",\"payload\":{\"cols\":180,\"rows\":50}}"
+    },
+    {
+      "name": "release_size",
+      "json": "{\"v\":1,\"type\":\"release_size\",\"sid\":\"s_abc123\",\"payload\":{}}"
+    },
+    {
+      "name": "session_end",
+      "json": "{\"v\":1,\"type\":\"session_end\",\"sid\":\"s_abc123\",\"payload\":{\"reason\":\"extension_disconnected\"}}"
+    },
+    {
+      "name": "error",
+      "json": "{\"v\":1,\"type\":\"error\",\"sid\":\"\",\"payload\":{\"code\":\"unauthorized\",\"message\":\"bad token\"}}"
+    }
+  ]
+}

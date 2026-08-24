@@ -1,0 +1,40 @@
+{
+  "name": "pietin",
+  "version": "0.1.0",
+  "description": "Share a Pi session to your browser — watch or drive that exact terminal from anywhere.",
+  "keywords": ["pi-package", "pi-extension", "terminal", "remote"],
+  "homepage": "https://pietin.sh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/teampietin/pietin.git"
+  },
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test src/*.test.ts src/protocol/*.test.ts"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.9.3"
+  },
+  "files": ["src", "README.md", "LICENSE"]
+}
