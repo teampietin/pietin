@@ -43,6 +43,31 @@ test("decode rejects malformed input", () => {
   assert.equal(decode('{"v":1,"type":"prompt","sid":"x","payload":{}}').ok, false);
 });
 
+test("unknown future conversation blocks degrade to Terminal fallback", () => {
+  const raw = JSON.stringify({
+    v: 1,
+    type: "conversation_event",
+    sid: "s_1",
+    seq: 1,
+    payload: {
+      kind: "message_upsert",
+      message: {
+        id: "m_1",
+        role: "assistant",
+        timestamp: 1,
+        blocks: [{ type: "future_canvas", pixels: "opaque future data" }],
+      },
+    },
+  });
+  const res = decode(raw);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  const payload = res.envelope.payload as { message: { blocks: unknown[] } };
+  assert.deepEqual(payload.message.blocks, [
+    { type: "unsupported", label: "Unsupported future_canvas content — open Terminal" },
+  ]);
+});
+
 test("output payload carries base64, not text", () => {
   const raw = "\x1b[0mHello\x1b[0m";
   const b64 = Buffer.from(raw, "utf8").toString("base64");

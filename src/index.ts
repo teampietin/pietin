@@ -9,6 +9,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { installStdoutTap, type Tap } from "./stdout-tap.ts";
 import { connectRelay, type RelayLink } from "./relay-link.ts";
 import { installSizeOverride, type SizeOverride } from "./size-override.ts";
+import { ConversationProjection } from "./conversation.ts";
 import { deviceLogin, httpBase, loadStoredToken, type DeviceLoginResult } from "./device-login.ts";
 
 const RELAY_URL = process.env.PIETIN_RELAY_URL ?? "wss://pietin.sh/ws/extension";
@@ -38,6 +39,63 @@ export default function pietin(pi: ExtensionAPI) {
   // Forces Pi's TUI to re-emit a full-screen keyframe. Captured at /rc time
   // (see captureRedraw); undefined outside interactive mode.
   let forceRedraw: (() => void) | undefined;
+  let conversation: ConversationProjection | undefined;
+
+  const emitConversation = (payload: Parameters<ConversationProjection["next"]>[0]) => {
+    if (!conversation || !link) return;
+    const event = conversation.next(payload);
+    link.sendConversationEvent(event.payload, event.seq);
+  };
+  const emitMeta = (ctx: ExtensionContext) => {
+    if (!conversation) return;
+    const usage = ctx.getContextUsage();
+    emitConversation(conversation.setMeta(
+      ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null,
+      usage?.tokens ?? null,
+      usage?.percent ?? null,
+    ));
+  };
+
+  // Pi already exposes semantic lifecycle events; project those directly rather
+  // than trying to reverse terminal cursor movement back into messages.
+  pi.on("message_start", (event) => {
+    if (!conversation) return;
+    const update = conversation.startMessage(event.message);
+    if (update) emitConversation(update);
+    if (event.message.role === "assistant") emitConversation(conversation.setTurnState("streaming"));
+  });
+  pi.on("message_update", (event) => {
+    if (!conversation) return;
+    const update = conversation.updateMessage(event.message);
+    if (update) emitConversation(update);
+  });
+  pi.on("message_end", (event) => {
+    if (!conversation) return;
+    const update = conversation.endMessage(event.message);
+    if (update) emitConversation(update);
+  });
+  pi.on("tool_execution_start", (event) => {
+    if (conversation) emitConversation(conversation.startTool(event.toolCallId, event.toolName, event.args));
+  });
+  pi.on("tool_execution_update", (event) => {
+    if (conversation) emitConversation(conversation.updateTool(
+      event.toolCallId, event.toolName, event.args, event.partialResult,
+    ));
+  });
+  pi.on("tool_execution_end", (event) => {
+    if (conversation) emitConversation(conversation.finishTool(event.toolCallId, event.toolName, event.result, event.isError));
+  });
+  pi.on("agent_start", (_event, ctx) => {
+    if (!conversation) return;
+    emitConversation(conversation.setTurnState("thinking"));
+    emitMeta(ctx);
+  });
+  pi.on("agent_end", (_event, ctx) => {
+    if (!conversation) return;
+    emitConversation(conversation.setTurnState("idle"));
+    emitMeta(ctx);
+  });
+  pi.on("model_select", (_event, ctx) => emitMeta(ctx));
 
   pi.registerCommand("rc", {
     description: "Share this session to pietin. Subcommands: login, stop",
@@ -95,6 +153,15 @@ export default function pietin(pi: ExtensionAPI) {
       const cols = process.stdout.columns ?? 80;
       const rows = process.stdout.rows ?? 24;
 
+      conversation = new ConversationProjection(ctx.sessionManager.getBranch());
+      const usage = ctx.getContextUsage();
+      conversation.setMeta(
+        ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null,
+        usage?.tokens ?? null,
+        usage?.percent ?? null,
+      );
+      conversation.setTurnState(ctx.isIdle() ? "idle" : "streaming");
+
       link = connectRelay({
         url: RELAY_URL,
         token,
@@ -116,6 +183,9 @@ export default function pietin(pi: ExtensionAPI) {
             ctx.ui.notify(`pietin: relay disconnected (${reason})`, "warning");
           }
           stop();
+        },
+        onConversationSnapshotRequest: () => {
+          if (conversation) link?.sendConversationSnapshot(conversation.snapshot());
         },
         onPrompt: (text) => {
           // Close the loop: a browser prompt becomes a real user message.
@@ -282,6 +352,7 @@ export default function pietin(pi: ExtensionAPI) {
     sessionId = undefined;
     seq = 0;
     forceRedraw = undefined;
+    conversation = undefined;
   }
 }
 

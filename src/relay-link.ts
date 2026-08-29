@@ -14,10 +14,71 @@
  * We never log ANSI payloads here (plans/base.md §12).
  */
 
-import { decode, encode, type MessageType } from "./protocol/index.ts";
+import {
+  decode, encode, type ConversationEventPayload, type ConversationSnapshotPayload, type MessageType,
+} from "./protocol/index.ts";
 
 /** Above this many buffered bytes we drop output frames instead of queueing. */
 const MAX_BUFFERED_BYTES = 1 << 20; // 1 MiB
+/** 48 KiB decoded keeps each base64 WebSocket frame comfortably below 80 KiB. */
+export const SNAPSHOT_CHUNK_BYTES = 48 * 1024;
+/**
+ * The relay accepts one atomic snapshot transfer of at most 240 chunks and
+ * 16 MiB of framed data. Oversized history stays available through the
+ * continuously-running Terminal view instead of consuming unbounded memory.
+ */
+export const SNAPSHOT_MAX_CHUNKS = 240;
+
+export function conversationSnapshotFrames(
+  snapshot: ConversationSnapshotPayload,
+  sid: string,
+  snapshotId: string = crypto.randomUUID(),
+): string[] | undefined {
+  const bytes = Buffer.from(JSON.stringify(snapshot), "utf8");
+  const chunks = Math.max(1, Math.ceil(bytes.length / SNAPSHOT_CHUNK_BYTES));
+  if (chunks > SNAPSHOT_MAX_CHUNKS) return undefined;
+  const frames = [encode("conversation_snapshot_begin", sid, {
+    snapshotId, revision: snapshot.revision, cursor: snapshot.cursor, chunks,
+  })];
+  for (let index = 0; index < chunks; index += 1) {
+    const data = bytes.subarray(index * SNAPSHOT_CHUNK_BYTES, (index + 1) * SNAPSHOT_CHUNK_BYTES).toString("base64");
+    frames.push(encode("conversation_snapshot_chunk", sid, { snapshotId, index, data }));
+  }
+  frames.push(encode("conversation_snapshot_end", sid, { snapshotId, cursor: snapshot.cursor }));
+  return frames;
+}
+
+export function conversationSnapshotTransfer(
+  snapshot: ConversationSnapshotPayload,
+  sid: string,
+  snapshotId: string = crypto.randomUUID(),
+): { frames: string[]; degraded: boolean } {
+  const frames = conversationSnapshotFrames(snapshot, sid, snapshotId);
+  if (frames) return { frames, degraded: false };
+
+  // Publish a tiny canonical snapshot at the same cursor so clients become
+  // synchronized, but make the loss of old history explicit and actionable.
+  // ANSI continues independently, so Terminal remains a faithful fallback.
+  const fallback: ConversationSnapshotPayload = {
+    revision: snapshot.revision,
+    cursor: snapshot.cursor,
+    messages: [{
+      id: "pietin:snapshot-too-large",
+      role: "system",
+      timestamp: 0,
+      blocks: [{
+        type: "unsupported",
+        label: "Conversation history is too large for live transfer — open Terminal",
+      }],
+    }],
+    tools: [],
+    turnState: snapshot.turnState,
+    model: snapshot.model,
+    contextTokens: snapshot.contextTokens,
+    contextPercent: snapshot.contextPercent,
+  };
+  return { frames: conversationSnapshotFrames(fallback, sid, snapshotId)!, degraded: true };
+}
 
 export interface RelayLinkOptions {
   url: string;
@@ -35,6 +96,8 @@ export interface RelayLinkOptions {
   onClose: (reason: string) => void;
   /** A viewer sent a prompt. Deliver it to the agent. */
   onPrompt: (text: string) => void;
+  /** A capable viewer attached or reattached and needs canonical history. */
+  onConversationSnapshotRequest: () => void;
   /** A viewer asked to interrupt the current turn. */
   onAbort: () => void;
   /** A viewer sent raw keystrokes (base64). Forward them to Pi's stdin. */
@@ -59,6 +122,10 @@ export interface RelayLink {
   sendOutput: (dataBase64: string, seq: number) => void;
   /** Report the current render size and who owns it. Best-effort. */
   sendResize: (cols: number, rows: number, owner: "local" | "browser") => void;
+  /** Send canonical structured history. Best-effort and memory-only. */
+  sendConversationSnapshot: (snapshot: ConversationSnapshotPayload) => void;
+  /** Send one ordered structured update. */
+  sendConversationEvent: (event: ConversationEventPayload, seq: number) => void;
   /** Close the link cleanly (sends `bye` if connected). Idempotent. */
   close: () => void;
 }
@@ -93,6 +160,28 @@ export function connectRelay(opts: RelayLinkOptions): RelayLink {
     sendResize(cols, rows, owner) {
       if (!ready || closed || ws.readyState !== WebSocket.OPEN) return;
       trySend("resize", sessionId!, { cols, rows, owner });
+    },
+    sendConversationSnapshot(snapshot) {
+      if (!ready || closed || ws.readyState !== WebSocket.OPEN) return;
+      const transfer = conversationSnapshotTransfer(snapshot, sessionId!);
+      if (transfer.degraded) {
+        const limitMiB = Math.floor(SNAPSHOT_MAX_CHUNKS * SNAPSHOT_CHUNK_BYTES / (1024 * 1024));
+        opts.onError(`conversation snapshot exceeds the ${limitMiB} MiB relay transfer limit; use Terminal view`);
+      }
+      // This loop is deliberately synchronous: the relay accepts only a
+      // contiguous transfer and publishes it to each viewer as one queue unit.
+      for (const frame of transfer.frames) {
+        try {
+          ws.send(frame);
+        } catch (err) {
+          opts.onError(`relay send failed: ${String(err)}`);
+          return;
+        }
+      }
+    },
+    sendConversationEvent(event, seq) {
+      if (!ready || closed || ws.readyState !== WebSocket.OPEN) return;
+      trySend("conversation_event", sessionId!, event, seq);
     },
     close() {
       if (closed) return;
@@ -136,6 +225,7 @@ export function connectRelay(opts: RelayLinkOptions): RelayLink {
       cols: opts.cols,
       rows: opts.rows,
       piVersion: opts.piVersion,
+      capabilities: ["structured_session"],
     });
   });
 
@@ -161,6 +251,8 @@ export function connectRelay(opts: RelayLinkOptions): RelayLink {
       // Never log prompt text (plans/base.md §12). Hand it straight to Pi.
       const p = env.payload as { text: string };
       opts.onPrompt(p.text);
+    } else if (env.type === "conversation_snapshot_request") {
+      opts.onConversationSnapshotRequest();
     } else if (env.type === "abort") {
       opts.onAbort();
     } else if (env.type === "input") {
@@ -201,6 +293,8 @@ function deadLink(): RelayLink {
     sessionId: undefined,
     sendOutput() {},
     sendResize() {},
+    sendConversationSnapshot() {},
+    sendConversationEvent() {},
     close() {},
   };
 }

@@ -60,6 +60,34 @@
     {
       "name": "error",
       "json": "{\"v\":1,\"type\":\"error\",\"sid\":\"\",\"payload\":{\"code\":\"unauthorized\",\"message\":\"bad token\"}}"
+    },
+    {
+      "name": "hello_capabilities",
+      "json": "{\"v\":1,\"type\":\"hello\",\"sid\":\"\",\"payload\":{\"token\":\"dev-token\",\"sessionName\":\"pietin\",\"cwd\":\"/tmp\",\"cols\":80,\"rows\":24,\"piVersion\":\"0.84.2\",\"capabilities\":[\"structured_session\"]}}"
+    },
+    {
+      "name": "attach_capabilities",
+      "json": "{\"v\":1,\"type\":\"attach\",\"sid\":\"\",\"payload\":{\"sessionId\":\"s_abc123\",\"capabilities\":[\"structured_session\"]}}"
+    },
+    {
+      "name": "conversation_snapshot_request",
+      "json": "{\"v\":1,\"type\":\"conversation_snapshot_request\",\"sid\":\"s_abc123\",\"payload\":{}}"
+    },
+    {
+      "name": "conversation_snapshot_begin",
+      "json": "{\"v\":1,\"type\":\"conversation_snapshot_begin\",\"sid\":\"s_abc123\",\"payload\":{\"snapshotId\":\"snap-1\",\"revision\":1,\"cursor\":4,\"chunks\":1}}"
+    },
+    {
+      "name": "conversation_snapshot_chunk",
+      "json": "{\"v\":1,\"type\":\"conversation_snapshot_chunk\",\"sid\":\"s_abc123\",\"payload\":{\"snapshotId\":\"snap-1\",\"index\":0,\"data\":\"e30=\"}}"
+    },
+    {
+      "name": "conversation_snapshot_end",
+      "json": "{\"v\":1,\"type\":\"conversation_snapshot_end\",\"sid\":\"s_abc123\",\"payload\":{\"snapshotId\":\"snap-1\",\"cursor\":4}}"
+    },
+    {
+      "name": "conversation_event",
+      "json": "{\"v\":1,\"type\":\"conversation_event\",\"sid\":\"s_abc123\",\"seq\":5,\"payload\":{\"kind\":\"message_upsert\",\"message\":{\"id\":\"assistant-3\",\"role\":\"assistant\",\"timestamp\":3,\"blocks\":[{\"type\":\"markdown\",\"text\":\"working\"}],\"streaming\":true}}}"
     }
   ]
 }
