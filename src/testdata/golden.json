@@ -88,6 +88,22 @@
     {
       "name": "conversation_event",
       "json": "{\"v\":1,\"type\":\"conversation_event\",\"sid\":\"s_abc123\",\"seq\":5,\"payload\":{\"kind\":\"message_upsert\",\"message\":{\"id\":\"assistant-3\",\"role\":\"assistant\",\"timestamp\":3,\"blocks\":[{\"type\":\"markdown\",\"text\":\"working\"}],\"streaming\":true}}}"
+    },
+    {
+      "name": "hello_resume",
+      "json": "{\"v\":1,\"type\":\"hello\",\"sid\":\"\",\"payload\":{\"token\":\"dev-token\",\"sessionName\":\"pietin\",\"cwd\":\"/tmp\",\"cols\":80,\"rows\":24,\"piVersion\":\"0.84.2\",\"capabilities\":[\"structured_session\"],\"resumeSessionId\":\"s_abc123\"}}"
+    },
+    {
+      "name": "session_end_dropped",
+      "json": "{\"v\":1,\"type\":\"session_end\",\"sid\":\"s_abc123\",\"payload\":{\"reason\":\"dropped\"}}"
+    },
+    {
+      "name": "session_status_detached",
+      "json": "{\"v\":1,\"type\":\"session_status\",\"sid\":\"s_abc123\",\"payload\":{\"attached\":false}}"
+    },
+    {
+      "name": "session_status_attached",
+      "json": "{\"v\":1,\"type\":\"session_status\",\"sid\":\"s_abc123\",\"payload\":{\"attached\":true}}"
     }
   ]
 }

@@ -170,17 +170,32 @@ export default function pietin(pi: ExtensionAPI) {
         cols,
         rows,
         piVersion: piVersion(),
-        onReady: (id) => {
+        onReady: (id, previous) => {
           sessionId = id;
-          ctx.ui.notify(`Sharing at ${sessionUrl(id)}`, "info");
+          if (previous === undefined) {
+            ctx.ui.notify(`Sharing at ${sessionUrl(id)}`, "info");
+          } else if (previous === id) {
+            // Resumed: the URL the user is holding still works, and any browser
+            // that was retrying has already reattached to it.
+            ctx.ui.notify("pietin: reconnected", "info");
+          } else {
+            // The relay would not give the old session back (gone too long), so
+            // the old URL is dead and the user needs the new one.
+            ctx.ui.notify(`pietin: reconnected with a new URL — ${sessionUrl(id)}`, "warning");
+          }
         },
         onError: (message) => {
           // A relay problem must never break the local session — warn only.
           ctx.ui.notify(`pietin: ${message}`, "warning");
         },
+        onDisconnected: (reason) => {
+          // Not the end of the session: the link retries and asks for the same
+          // id back. Keep the tap installed so nothing else has to be rebuilt.
+          ctx.ui.notify(`pietin: relay disconnected (${reason}) — reconnecting…`, "warning");
+        },
         onClose: (reason) => {
           if (link) {
-            ctx.ui.notify(`pietin: relay disconnected (${reason})`, "warning");
+            ctx.ui.notify(`pietin: sharing stopped (${reason})`, "warning");
           }
           stop();
         },

@@ -10,6 +10,12 @@
  *  2. Never block on the socket. If the send buffer is backed up, the frame
  *     is dropped — the browser detects the gap via `seq` and asks for a
  *     redraw (step 8). We do not await inside the output path.
+ *  3. Never let a dropped socket end the session. Pi is still running, so the
+ *     link reconnects with backoff and presents its old session id in `hello`
+ *     (`resumeSessionId`). The relay hands the SAME id back, so the URL the
+ *     user is holding survives a relay restart, a deploy, or a tunnel change.
+ *     Frames produced while disconnected are dropped; viewers ask for a redraw
+ *     when the relay tells them the laptop is back.
  *
  * We never log ANSI payloads here (plans/base.md §12).
  */
@@ -88,11 +94,20 @@ export interface RelayLinkOptions {
   cols: number;
   rows: number;
   piVersion: string;
-  /** Called with the session id once the relay acks the hello. */
-  onReady: (sessionId: string) => void;
+  /**
+   * Called with the session id every time the relay acks a hello.
+   *
+   * `previous` is the id held before a reconnect: undefined on the first
+   * connect, the SAME id when the session was resumed, and a different id when
+   * the relay refused the resume — which means the URL changed and the user
+   * has to be told.
+   */
+  onReady: (sessionId: string, previous: string | undefined) => void;
   /** Called on any non-fatal problem. Must never throw. */
   onError: (message: string) => void;
-  /** Called when the socket closes for any reason. */
+  /** The socket dropped and the link is retrying. The session is not over. */
+  onDisconnected: (reason: string) => void;
+  /** The link has given up for good: a fatal refusal, or close() was called. */
   onClose: (reason: string) => void;
   /** A viewer sent a prompt. Deliver it to the agent. */
   onPrompt: (text: string) => void;
@@ -130,19 +145,24 @@ export interface RelayLink {
   close: () => void;
 }
 
+/**
+ * Backoff for the extension's reconnect. The same shape the browser uses, but
+ * it never gives up: Pi is still running, and as long as it is, the laptop
+ * should keep trying to get its session back.
+ */
+const RECONNECT_BASE_MS = 500;
+const RECONNECT_MAX_MS = 15_000;
+
 export function connectRelay(opts: RelayLinkOptions): RelayLink {
   let sessionId: string | undefined;
   let ready = false;
+  /** The link is finished for good: close() was called, or the relay refused us. */
   let closed = false;
+  let ws: WebSocket | undefined;
+  let attempt = 0;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
-  let ws: WebSocket;
-  try {
-    ws = new WebSocket(opts.url);
-  } catch (err) {
-    opts.onError(`could not open relay socket: ${String(err)}`);
-    // Return a dead link so callers never crash.
-    return deadLink();
-  }
+  const open = (): boolean => !closed && ready && ws?.readyState === WebSocket.OPEN;
 
   const link: RelayLink = {
     get ready() {
@@ -152,17 +172,17 @@ export function connectRelay(opts: RelayLinkOptions): RelayLink {
       return sessionId;
     },
     sendOutput(dataBase64, seq) {
-      if (!ready || closed || ws.readyState !== WebSocket.OPEN) return;
+      if (!open()) return;
       // Drop rather than block Pi's render path.
-      if (ws.bufferedAmount > MAX_BUFFERED_BYTES) return;
+      if (ws!.bufferedAmount > MAX_BUFFERED_BYTES) return;
       trySend("output", sessionId!, { data: dataBase64 }, seq);
     },
     sendResize(cols, rows, owner) {
-      if (!ready || closed || ws.readyState !== WebSocket.OPEN) return;
+      if (!open()) return;
       trySend("resize", sessionId!, { cols, rows, owner });
     },
     sendConversationSnapshot(snapshot) {
-      if (!ready || closed || ws.readyState !== WebSocket.OPEN) return;
+      if (!open()) return;
       const transfer = conversationSnapshotTransfer(snapshot, sessionId!);
       if (transfer.degraded) {
         const limitMiB = Math.floor(SNAPSHOT_MAX_CHUNKS * SNAPSHOT_CHUNK_BYTES / (1024 * 1024));
@@ -172,7 +192,7 @@ export function connectRelay(opts: RelayLinkOptions): RelayLink {
       // contiguous transfer and publishes it to each viewer as one queue unit.
       for (const frame of transfer.frames) {
         try {
-          ws.send(frame);
+          ws!.send(frame);
         } catch (err) {
           opts.onError(`relay send failed: ${String(err)}`);
           return;
@@ -180,21 +200,26 @@ export function connectRelay(opts: RelayLinkOptions): RelayLink {
       }
     },
     sendConversationEvent(event, seq) {
-      if (!ready || closed || ws.readyState !== WebSocket.OPEN) return;
+      if (!open()) return;
       trySend("conversation_event", sessionId!, event, seq);
     },
     close() {
       if (closed) return;
       closed = true;
+      ready = false;
+      if (reconnectTimer !== undefined) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
       try {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(encode("bye", sessionId ?? "", {}));
-        }
+        // `bye` tells the relay this is a deliberate stop, not a drop — it ends
+        // the session at once instead of holding the id open for a resume.
+        if (ws?.readyState === WebSocket.OPEN) ws.send(encode("bye", sessionId ?? "", {}));
       } catch {
         // ignore — we are closing anyway
       }
       try {
-        ws.close();
+        ws?.close();
       } catch {
         // ignore
       }
@@ -210,91 +235,124 @@ export function connectRelay(opts: RelayLinkOptions): RelayLink {
     try {
       // encode is typed per message; cast is safe because callers pass the
       // matching payload for `type`.
-      ws.send(encode(type, sid, payload as never, seq));
+      ws!.send(encode(type, sid, payload as never, seq));
     } catch (err) {
       opts.onError(`relay send failed: ${String(err)}`);
     }
   }
 
-  ws.addEventListener("open", () => {
-    if (closed) return;
-    trySend("hello", "", {
-      token: opts.token,
-      sessionName: opts.sessionName,
-      cwd: opts.cwd,
-      cols: opts.cols,
-      rows: opts.rows,
-      piVersion: opts.piVersion,
-      capabilities: ["structured_session"],
-    });
-  });
-
-  ws.addEventListener("message", (ev) => {
-    if (closed) return;
-    const data = (ev as { data: unknown }).data;
-    const raw = typeof data === "string" ? data : undefined;
-    if (raw === undefined) return; // relay only sends text frames to the extension
-    const res = decode(raw);
-    if (!res.ok) {
-      opts.onError(`relay sent an invalid frame: ${res.error}`);
-      return;
-    }
-    const env = res.envelope;
-    if (env.type === "ack") {
-      sessionId = env.sid;
-      ready = true;
-      opts.onReady(sessionId);
-    } else if (env.type === "error") {
-      const p = env.payload as { code: string; message: string };
-      opts.onError(`relay refused connection: ${p.message} (${p.code})`);
-    } else if (env.type === "prompt") {
-      // Never log prompt text (plans/base.md §12). Hand it straight to Pi.
-      const p = env.payload as { text: string };
-      opts.onPrompt(p.text);
-    } else if (env.type === "conversation_snapshot_request") {
-      opts.onConversationSnapshotRequest();
-    } else if (env.type === "abort") {
-      opts.onAbort();
-    } else if (env.type === "input") {
-      // Raw keystrokes — never logged (plans/base.md §12). Pass the base64
-      // through; the caller decodes and feeds Pi's stdin.
-      const p = env.payload as { data: string };
-      opts.onInput(p.data);
-    } else if (env.type === "request_redraw") {
-      // Empty control frame — force a full repaint. Nothing to log.
-      opts.onRedraw();
-    } else if (env.type === "set_size") {
-      const p = env.payload as { cols: number; rows: number };
-      opts.onSetSize(p.cols, p.rows);
-    } else if (env.type === "release_size") {
-      opts.onReleaseSize();
-    }
-  });
-
-  ws.addEventListener("error", () => {
-    if (closed) return;
-    opts.onError("relay connection error");
-  });
-
-  ws.addEventListener("close", (ev) => {
-    ready = false;
+  /** Gives up for good. Only a refusal we cannot outlast gets here. */
+  function fail(reason: string): void {
     if (closed) return;
     closed = true;
-    const { code, reason } = ev as { code: number; reason: string };
-    opts.onClose(reason || `code ${code}`);
-  });
+    ready = false;
+    opts.onClose(reason);
+  }
+
+  function scheduleReconnect(): void {
+    if (closed) return;
+    const backoff = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** attempt);
+    const delay = backoff + Math.random() * backoff * 0.25; // jitter, avoid stampede
+    attempt += 1;
+    reconnectTimer = setTimeout(dial, delay);
+  }
+
+  function dial(): void {
+    if (closed) return;
+    reconnectTimer = undefined;
+
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(opts.url);
+    } catch (err) {
+      // A URL the WebSocket constructor rejects will never become valid.
+      fail(`could not open relay socket: ${String(err)}`);
+      return;
+    }
+    ws = socket;
+
+    socket.addEventListener("open", () => {
+      if (closed || ws !== socket) return;
+      trySend("hello", "", {
+        token: opts.token,
+        sessionName: opts.sessionName,
+        cwd: opts.cwd,
+        cols: opts.cols,
+        rows: opts.rows,
+        piVersion: opts.piVersion,
+        capabilities: ["structured_session"],
+        // Ask for the session back. Empty on the first connect; after that it
+        // is what keeps the user's URL alive across a relay restart.
+        ...(sessionId ? { resumeSessionId: sessionId } : {}),
+      });
+    });
+
+    socket.addEventListener("message", (ev) => {
+      if (closed || ws !== socket) return;
+      const data = (ev as { data: unknown }).data;
+      const raw = typeof data === "string" ? data : undefined;
+      if (raw === undefined) return; // relay only sends text frames to the extension
+      const res = decode(raw);
+      if (!res.ok) {
+        opts.onError(`relay sent an invalid frame: ${res.error}`);
+        return;
+      }
+      const env = res.envelope;
+      if (env.type === "ack") {
+        const previous = sessionId;
+        sessionId = env.sid;
+        ready = true;
+        attempt = 0; // a working connection earns a clean backoff
+        opts.onReady(sessionId, previous);
+      } else if (env.type === "error") {
+        const p = env.payload as { code: string; message: string };
+        if (p.code === "unauthorized") {
+          // Retrying cannot fix a token the relay does not know.
+          fail(`relay refused connection: ${p.message} (${p.code})`);
+          return;
+        }
+        opts.onError(`relay refused connection: ${p.message} (${p.code})`);
+      } else if (env.type === "prompt") {
+        // Never log prompt text (plans/base.md §12). Hand it straight to Pi.
+        const p = env.payload as { text: string };
+        opts.onPrompt(p.text);
+      } else if (env.type === "conversation_snapshot_request") {
+        opts.onConversationSnapshotRequest();
+      } else if (env.type === "abort") {
+        opts.onAbort();
+      } else if (env.type === "input") {
+        // Raw keystrokes — never logged (plans/base.md §12). Pass the base64
+        // through; the caller decodes and feeds Pi's stdin.
+        const p = env.payload as { data: string };
+        opts.onInput(p.data);
+      } else if (env.type === "request_redraw") {
+        // Empty control frame — force a full repaint. Nothing to log.
+        opts.onRedraw();
+      } else if (env.type === "set_size") {
+        const p = env.payload as { cols: number; rows: number };
+        opts.onSetSize(p.cols, p.rows);
+      } else if (env.type === "release_size") {
+        opts.onReleaseSize();
+      }
+    });
+
+    socket.addEventListener("error", () => {
+      if (closed || ws !== socket) return;
+      // Always followed by close, which drives the reconnect. Report only.
+      opts.onError("relay connection error");
+    });
+
+    socket.addEventListener("close", (ev) => {
+      if (ws !== socket) return; // a newer socket already took over
+      ready = false;
+      if (closed) return;
+      const { code, reason } = ev as { code: number; reason: string };
+      opts.onDisconnected(reason || `code ${code}`);
+      scheduleReconnect();
+    });
+  }
+
+  dial();
 
   return link;
-}
-
-function deadLink(): RelayLink {
-  return {
-    ready: false,
-    sessionId: undefined,
-    sendOutput() {},
-    sendResize() {},
-    sendConversationSnapshot() {},
-    sendConversationEvent() {},
-    close() {},
-  };
 }

@@ -26,6 +26,17 @@ export const HelloPayload = z.object({
   piVersion: z.string(),
   /** Optional features understood by this extension. */
   capabilities: z.array(z.string()).optional(),
+  /**
+   * The id of a session this extension owned before the socket dropped.
+   *
+   * A relay restart, a deploy, or a network blip breaks the socket while Pi
+   * keeps running. The extension reconnects and presents the old id here, so
+   * the relay can hand back the SAME session instead of minting a new one and
+   * killing the URL the user is holding. The relay grants it only to the
+   * machine that owns the session, and only inside the resume window; the
+   * `ack` always reports the id actually in use.
+   */
+  resumeSessionId: z.string().optional(),
 });
 
 /** A chunk of raw ANSI captured from Pi's stdout. Base64 — it is not text. */
@@ -180,7 +191,25 @@ export const ConversationEventPayload = z.discriminatedUnion("kind", [
 // ---------------------------------------------------------------------------
 
 export const SessionEndPayload = z.object({
-  reason: z.enum(["extension_disconnected", "stopped", "error"]),
+  /**
+   * Why the viewer socket ended. `dropped` is RECOVERABLE — the viewer fell
+   * behind and was cut, but the session is live and the browser should
+   * reattach. The rest are terminal for this session id.
+   */
+  reason: z.enum(["extension_disconnected", "stopped", "error", "dropped", "forbidden"]),
+});
+
+/**
+ * Whether the session currently has a live extension socket.
+ *
+ * The relay sends it to a viewer on attach and on every change. `false` means
+ * the laptop dropped and the session is inside its resume window: the terminal
+ * the viewer is showing is frozen, not dead. `true` after a `false` means the
+ * extension came back — a viewer should ask for a redraw and a fresh
+ * conversation snapshot, because the relay replays nothing.
+ */
+export const SessionStatusPayload = z.object({
+  attached: z.boolean(),
 });
 
 export const ErrorPayload = z.object({
@@ -214,6 +243,7 @@ export const MessageType = z.enum([
   "release_size",
   // relay -> client
   "session_end",
+  "session_status",
   "error",
   "ack",
 ]);
@@ -243,6 +273,7 @@ export type AttachPayload = z.infer<typeof AttachPayload>;
 export type PromptPayload = z.infer<typeof PromptPayload>;
 export type InputPayload = z.infer<typeof InputPayload>;
 export type SessionEndPayload = z.infer<typeof SessionEndPayload>;
+export type SessionStatusPayload = z.infer<typeof SessionStatusPayload>;
 export type ErrorPayload = z.infer<typeof ErrorPayload>;
 export type ConversationBlock = z.infer<typeof ConversationBlock>;
 export type ConversationMessage = z.infer<typeof ConversationMessage>;
@@ -274,6 +305,7 @@ export const PayloadSchemas = {
   set_size: SetSizePayload,
   release_size: z.object({}),
   session_end: SessionEndPayload,
+  session_status: SessionStatusPayload,
   error: ErrorPayload,
   ack: z.object({}),
 } as const satisfies Record<MessageType, z.ZodType>;
