@@ -153,6 +153,24 @@ export interface RelayLink {
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 15_000;
 
+/**
+ * Runs a consumer callback and swallows anything it throws.
+ *
+ * The link's own lifecycle must never depend on Pi behaving. `ctx.ui.notify`
+ * throws in some TUI states, and a throw out of the close handler used to kill
+ * the retry chain outright — the laptop then never came back and the session
+ * expired, which is the exact failure this module exists to prevent. There is
+ * nowhere safe to report the fault to (the error callback can throw too), so it
+ * is dropped.
+ */
+function safely(run: () => void): void {
+  try {
+    run();
+  } catch {
+    // A consumer fault must not become a relay fault.
+  }
+}
+
 export function connectRelay(opts: RelayLinkOptions): RelayLink {
   let sessionId: string | undefined;
   let ready = false;
@@ -237,7 +255,7 @@ export function connectRelay(opts: RelayLinkOptions): RelayLink {
       // matching payload for `type`.
       ws!.send(encode(type, sid, payload as never, seq));
     } catch (err) {
-      opts.onError(`relay send failed: ${String(err)}`);
+      safely(() => opts.onError(`relay send failed: ${String(err)}`));
     }
   }
 
@@ -246,7 +264,7 @@ export function connectRelay(opts: RelayLinkOptions): RelayLink {
     if (closed) return;
     closed = true;
     ready = false;
-    opts.onClose(reason);
+    safely(() => opts.onClose(reason));
   }
 
   function scheduleReconnect(): void {
@@ -294,7 +312,7 @@ export function connectRelay(opts: RelayLinkOptions): RelayLink {
       if (raw === undefined) return; // relay only sends text frames to the extension
       const res = decode(raw);
       if (!res.ok) {
-        opts.onError(`relay sent an invalid frame: ${res.error}`);
+        safely(() => opts.onError(`relay sent an invalid frame: ${res.error}`));
         return;
       }
       const env = res.envelope;
@@ -303,7 +321,7 @@ export function connectRelay(opts: RelayLinkOptions): RelayLink {
         sessionId = env.sid;
         ready = true;
         attempt = 0; // a working connection earns a clean backoff
-        opts.onReady(sessionId, previous);
+        safely(() => opts.onReady(sessionId!, previous));
       } else if (env.type === "error") {
         const p = env.payload as { code: string; message: string };
         if (p.code === "unauthorized") {
@@ -311,35 +329,35 @@ export function connectRelay(opts: RelayLinkOptions): RelayLink {
           fail(`relay refused connection: ${p.message} (${p.code})`);
           return;
         }
-        opts.onError(`relay refused connection: ${p.message} (${p.code})`);
+        safely(() => opts.onError(`relay refused connection: ${p.message} (${p.code})`));
       } else if (env.type === "prompt") {
         // Never log prompt text (plans/base.md §12). Hand it straight to Pi.
         const p = env.payload as { text: string };
-        opts.onPrompt(p.text);
+        safely(() => opts.onPrompt(p.text));
       } else if (env.type === "conversation_snapshot_request") {
-        opts.onConversationSnapshotRequest();
+        safely(() => opts.onConversationSnapshotRequest());
       } else if (env.type === "abort") {
-        opts.onAbort();
+        safely(() => opts.onAbort());
       } else if (env.type === "input") {
         // Raw keystrokes — never logged (plans/base.md §12). Pass the base64
         // through; the caller decodes and feeds Pi's stdin.
         const p = env.payload as { data: string };
-        opts.onInput(p.data);
+        safely(() => opts.onInput(p.data));
       } else if (env.type === "request_redraw") {
         // Empty control frame — force a full repaint. Nothing to log.
-        opts.onRedraw();
+        safely(() => opts.onRedraw());
       } else if (env.type === "set_size") {
         const p = env.payload as { cols: number; rows: number };
-        opts.onSetSize(p.cols, p.rows);
+        safely(() => opts.onSetSize(p.cols, p.rows));
       } else if (env.type === "release_size") {
-        opts.onReleaseSize();
+        safely(() => opts.onReleaseSize());
       }
     });
 
     socket.addEventListener("error", () => {
       if (closed || ws !== socket) return;
       // Always followed by close, which drives the reconnect. Report only.
-      opts.onError("relay connection error");
+      safely(() => opts.onError("relay connection error"));
     });
 
     socket.addEventListener("close", (ev) => {
@@ -347,8 +365,10 @@ export function connectRelay(opts: RelayLinkOptions): RelayLink {
       ready = false;
       if (closed) return;
       const { code, reason } = ev as { code: number; reason: string };
-      opts.onDisconnected(reason || `code ${code}`);
+      // Schedule BEFORE telling anyone. Getting the laptop back is the one
+      // thing that must happen here, so nothing a consumer does can preempt it.
       scheduleReconnect();
+      safely(() => opts.onDisconnected(reason || `code ${code}`));
     });
   }
 
